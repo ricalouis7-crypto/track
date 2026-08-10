@@ -1,30 +1,32 @@
 /**
- * LIVE VISITOR TRACKER
+ * BusinessMarket18 / Apply750
+ * Live Visitor Tracking Server
  *
  * Endpoints:
+ *
  * POST /track
  * GET  /active-now
  * GET  /live-stats
+ * GET  /daily-stats
+ * GET  /weekly-stats
+ * GET  /monthly-stats
+ * GET  /
  *
- * Historical:
- * GET /traffic-history?range=today
- * GET /traffic-history?range=7days
- * GET /traffic-history?range=30days
- * GET /traffic-history?range=90days
- * GET /traffic-history?from=2026-08-01&to=2026-08-06
+ * Data is stored in events.jsonl.
  *
- * Health:
- * GET /health
- *
- * Dashboard:
- * GET /
- * GET /dashboard.html
+ * IMPORTANT:
+ * - This server does NOT need dashboard.html.
+ * - Your Wix/Apply750 HTML dashboard can call these endpoints.
  */
 
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const url = require("url");
+
+// --------------------------------------------------
+// SETTINGS
+// --------------------------------------------------
 
 const PORT = process.env.PORT || 4000;
 
@@ -34,93 +36,89 @@ const ALLOWED_ORIGIN =
 const EVENTS_FILE =
   path.join(__dirname, "events.jsonl");
 
-const ACTIVE_WINDOW_MS =
-  60 * 1000;
+// Keep 30 days of events in memory
+const HISTORY_DAYS = 30;
 
-const MAX_EVENTS_IN_MEMORY =
-  500000;
+const HISTORY_MS =
+  HISTORY_DAYS * 24 * 60 * 60 * 1000;
 
-const HISTORY_DAYS =
-  90;
+// Visitor is considered active if seen
+// within the last 60 seconds
+const ACTIVE_WINDOW_MS = 60 * 1000;
 
+// Maximum number of events kept in memory
+const MAX_EVENTS_IN_MEMORY = 200000;
 
-/* ============================================================
-   EVENTS
-============================================================ */
+// --------------------------------------------------
+// MEMORY
+// --------------------------------------------------
 
 let events = [];
 
-
-/* ============================================================
-   LOAD SAVED EVENTS
-============================================================ */
+// --------------------------------------------------
+// LOAD SAVED HISTORY
+// --------------------------------------------------
 
 function loadEvents() {
 
   if (!fs.existsSync(EVENTS_FILE)) {
-    console.log("No events.jsonl found.");
+    console.log("No events.jsonl file found.");
     return;
   }
 
   try {
 
-    const content =
-      fs.readFileSync(EVENTS_FILE, "utf8");
-
-    const lines =
-      content
-        .split("\n")
-        .filter(Boolean);
+    const lines = fs
+      .readFileSync(EVENTS_FILE, "utf8")
+      .split("\n")
+      .filter(Boolean);
 
     const cutoff =
-      Date.now() -
-      HISTORY_DAYS *
-      24 *
-      60 *
-      60 *
-      1000;
+      Date.now() - HISTORY_MS;
 
     for (const line of lines) {
 
       try {
 
-        const event =
-          JSON.parse(line);
+        const e = JSON.parse(line);
 
         if (
-          event &&
-          Number.isFinite(event.ts) &&
-          event.ts >= cutoff
+          e &&
+          typeof e.ts === "number" &&
+          e.ts >= cutoff
         ) {
-          events.push(event);
+
+          events.push(e);
+
         }
 
       } catch (error) {
+
         // Ignore invalid lines
+
       }
+
     }
 
-    if (
-      events.length >
-      MAX_EVENTS_IN_MEMORY
-    ) {
+    // Protect memory
+    if (events.length > MAX_EVENTS_IN_MEMORY) {
+
       events =
         events.slice(
-          -MAX_EVENTS_IN_MEMORY
+          events.length - MAX_EVENTS_IN_MEMORY
         );
+
     }
 
     console.log(
-      "Loaded " +
-      events.length +
-      " events from disk."
+      `Loaded ${events.length} events from disk`
     );
 
   } catch (error) {
 
     console.error(
-      "Error loading events:",
-      error.message
+      "Could not load events.jsonl:",
+      error
     );
 
   }
@@ -128,33 +126,57 @@ function loadEvents() {
 
 loadEvents();
 
-
-/* ============================================================
-   SAVE EVENT TO DISK
-============================================================ */
+// --------------------------------------------------
+// SAVE EVENT
+// --------------------------------------------------
 
 function appendToDisk(event) {
 
   fs.appendFile(
     EVENTS_FILE,
     JSON.stringify(event) + "\n",
-    function(error) {
+    (error) => {
 
       if (error) {
         console.error(
-          "Error saving event:",
-          error.message
+          "Could not save event:",
+          error
         );
       }
 
     }
   );
+
 }
 
+// --------------------------------------------------
+// CLEAN OLD MEMORY EVENTS
+// --------------------------------------------------
 
-/* ============================================================
-   JSON RESPONSE
-============================================================ */
+function cleanupEvents() {
+
+  const cutoff =
+    Date.now() - HISTORY_MS;
+
+  events =
+    events.filter(
+      (event) => event.ts >= cutoff
+    );
+
+  if (events.length > MAX_EVENTS_IN_MEMORY) {
+
+    events =
+      events.slice(
+        events.length - MAX_EVENTS_IN_MEMORY
+      );
+
+  }
+
+}
+
+// --------------------------------------------------
+// SEND JSON
+// --------------------------------------------------
 
 function sendJSON(
   res,
@@ -165,49 +187,56 @@ function sendJSON(
   const body =
     JSON.stringify(data);
 
-  res.writeHead(
-    status,
-    {
-      "Content-Type":
-        "application/json",
+  res.writeHead(status, {
 
-      "Access-Control-Allow-Origin":
-        ALLOWED_ORIGIN,
+    "Content-Type":
+      "application/json; charset=utf-8",
 
-      "Access-Control-Allow-Methods":
-        "GET, POST, OPTIONS",
+    "Access-Control-Allow-Origin":
+      ALLOWED_ORIGIN,
 
-      "Access-Control-Allow-Headers":
-        "Content-Type"
-    }
-  );
+    "Access-Control-Allow-Methods":
+      "GET, POST, OPTIONS",
+
+    "Access-Control-Allow-Headers":
+      "Content-Type",
+
+    "Cache-Control":
+      "no-store"
+
+  });
 
   res.end(body);
+
 }
 
-
-/* ============================================================
-   READ BODY
-============================================================ */
+// --------------------------------------------------
+// READ POST BODY
+// --------------------------------------------------
 
 function readBody(req) {
 
   return new Promise(
-    function(resolve, reject) {
+    (resolve, reject) => {
 
       let data = "";
 
       req.on(
         "data",
-        function(chunk) {
+        (chunk) => {
 
           data += chunk;
 
-          if (
-            data.length >
-            1000000
-          ) {
+          if (data.length > 1000000) {
+
             req.destroy();
+
+            reject(
+              new Error(
+                "Request too large"
+              )
+            );
+
           }
 
         }
@@ -215,343 +244,26 @@ function readBody(req) {
 
       req.on(
         "end",
-        function() {
-          resolve(data);
-        }
+        () => resolve(data)
       );
 
       req.on(
         "error",
-        function(error) {
-          reject(error);
-        }
+        reject
       );
 
     }
   );
+
 }
 
-
-/* ============================================================
-   UNIQUE VISITORS
-============================================================ */
-
-function getUniqueVisitors(list) {
-
-  const sessions =
-    new Set();
-
-  for (
-    const event of list
-  ) {
-
-    sessions.add(
-      event.sessionId
-    );
-
-  }
-
-  return sessions.size;
-}
-
-
-/* ============================================================
-   DAILY DATA
-============================================================ */
-
-function getDailyHistory(
-  from,
-  to
-) {
-
-  const result = [];
-
-  const start =
-    new Date(from);
-
-  start.setHours(
-    0,
-    0,
-    0,
-    0
-  );
-
-  const end =
-    new Date(to);
-
-  end.setHours(
-    0,
-    0,
-    0,
-    0
-  );
-
-  for (
-    let timestamp =
-      start.getTime();
-
-    timestamp <=
-      end.getTime();
-
-    timestamp +=
-      24 *
-      60 *
-      60 *
-      1000
-  ) {
-
-    const dayStart =
-      timestamp;
-
-    const dayEnd =
-      timestamp +
-      24 *
-      60 *
-      60 *
-      1000 -
-      1;
-
-    const dayEvents =
-      events.filter(
-        function(event) {
-
-          return (
-            event.ts >= dayStart &&
-            event.ts <= dayEnd
-          );
-
-        }
-      );
-
-    result.push({
-
-      date:
-        new Date(
-          timestamp
-        )
-        .toISOString()
-        .slice(
-          0,
-          10
-        ),
-
-      visitors:
-        getUniqueVisitors(
-          dayEvents
-        ),
-
-      pageviews:
-        dayEvents.length
-
-    });
-  }
-
-  return result;
-}
-
-
-/* ============================================================
-   WEEKLY DATA
-============================================================ */
-
-function getWeeklyHistory(
-  from,
-  to
-) {
-
-  const weeks =
-    new Map();
-
-  for (
-    const event of events
-  ) {
-
-    if (
-      event.ts < from ||
-      event.ts > to
-    ) {
-      continue;
-    }
-
-    const date =
-      new Date(
-        event.ts
-      );
-
-    const day =
-      date.getDay();
-
-    const difference =
-      day === 0
-        ? -6
-        : 1 - day;
-
-    date.setDate(
-      date.getDate() +
-      difference
-    );
-
-    date.setHours(
-      0,
-      0,
-      0,
-      0
-    );
-
-    const key =
-      date
-        .toISOString()
-        .slice(
-          0,
-          10
-        );
-
-    if (
-      !weeks.has(key)
-    ) {
-      weeks.set(
-        key,
-        []
-      );
-    }
-
-    weeks
-      .get(key)
-      .push(event);
-  }
-
-  return Array.from(
-    weeks.entries()
-  )
-  .sort(
-    function(a, b) {
-      return a[0]
-        .localeCompare(
-          b[0]
-        );
-    }
-  )
-  .map(
-    function(entry) {
-
-      const week =
-        entry[0];
-
-      const list =
-        entry[1];
-
-      return {
-
-        week: week,
-
-        visitors:
-          getUniqueVisitors(
-            list
-          ),
-
-        pageviews:
-          list.length
-
-      };
-
-    }
-  );
-}
-
-
-/* ============================================================
-   MONTHLY DATA
-============================================================ */
-
-function getMonthlyHistory(
-  from,
-  to
-) {
-
-  const months =
-    new Map();
-
-  for (
-    const event of events
-  ) {
-
-    if (
-      event.ts < from ||
-      event.ts > to
-    ) {
-      continue;
-    }
-
-    const date =
-      new Date(
-        event.ts
-      );
-
-    const key =
-      date.getFullYear() +
-      "-" +
-      String(
-        date.getMonth() + 1
-      ).padStart(
-        2,
-        "0"
-      );
-
-    if (
-      !months.has(key)
-    ) {
-      months.set(
-        key,
-        []
-      );
-    }
-
-    months
-      .get(key)
-      .push(event);
-  }
-
-  return Array.from(
-    months.entries()
-  )
-  .sort(
-    function(a, b) {
-      return a[0]
-        .localeCompare(
-          b[0]
-        );
-    }
-  )
-  .map(
-    function(entry) {
-
-      return {
-
-        month:
-          entry[0],
-
-        visitors:
-          getUniqueVisitors(
-            entry[1]
-          ),
-
-        pageviews:
-          entry[1].length
-
-      };
-
-    }
-  );
-}
-
-
-/* ============================================================
-   SERVER
-============================================================ */
+// --------------------------------------------------
+// CREATE SERVER
+// --------------------------------------------------
 
 const server =
   http.createServer(
-    async function(req, res) {
+    async (req, res) => {
 
       const parsed =
         url.parse(
@@ -559,19 +271,18 @@ const server =
           true
         );
 
-
-      /* ======================================================
-         CORS
-      ====================================================== */
+      // ----------------------------------------------
+      // CORS PREFLIGHT
+      // ----------------------------------------------
 
       if (
-        req.method ===
-        "OPTIONS"
+        req.method === "OPTIONS"
       ) {
 
         res.writeHead(
           204,
           {
+
             "Access-Control-Allow-Origin":
               ALLOWED_ORIGIN,
 
@@ -580,16 +291,78 @@ const server =
 
             "Access-Control-Allow-Headers":
               "Content-Type"
+
           }
         );
 
         return res.end();
+
       }
 
+      // ----------------------------------------------
+      // CLEAN OLD EVENTS
+      // ----------------------------------------------
 
-      /* ======================================================
-         POST /track
-      ====================================================== */
+      cleanupEvents();
+
+      // ----------------------------------------------
+      // ROOT /
+      // ----------------------------------------------
+
+      if (
+        req.method === "GET" &&
+        parsed.pathname === "/"
+      ) {
+
+        return sendJSON(
+          res,
+          200,
+          {
+
+            ok: true,
+
+            service:
+              "BusinessMarket18 Live Visitor Tracker",
+
+            status:
+              "online",
+
+            historyDays:
+              HISTORY_DAYS,
+
+            eventsInMemory:
+              events.length,
+
+            endpoints: {
+
+              track:
+                "POST /track",
+
+              activeNow:
+                "GET /active-now",
+
+              liveStats:
+                "GET /live-stats",
+
+              dailyStats:
+                "GET /daily-stats",
+
+              weeklyStats:
+                "GET /weekly-stats",
+
+              monthlyStats:
+                "GET /monthly-stats"
+
+            }
+
+          }
+        );
+
+      }
+
+      // ----------------------------------------------
+      // POST /track
+      // ----------------------------------------------
 
       if (
         req.method === "POST" &&
@@ -601,10 +374,30 @@ const server =
           const raw =
             await readBody(req);
 
-          const payload =
-            raw
-              ? JSON.parse(raw)
-              : {};
+          let payload = {};
+
+          if (raw) {
+
+            try {
+
+              payload =
+                JSON.parse(raw);
+
+            } catch (error) {
+
+              return sendJSON(
+                res,
+                400,
+                {
+                  ok: false,
+                  error:
+                    "Invalid JSON"
+                }
+              );
+
+            }
+
+          }
 
           const event = {
 
@@ -615,91 +408,77 @@ const server =
               String(
                 payload.sessionId ||
                 "unknown"
-              )
-              .slice(
-                0,
-                64
-              ),
+              ).slice(0, 100),
 
             page:
               String(
                 payload.page ||
                 "/"
-              )
-              .slice(
-                0,
-                256
-              ),
+              ).slice(0, 500),
 
             ref:
               String(
                 payload.ref ||
                 ""
-              )
-              .slice(
-                0,
-                256
-              ),
+              ).slice(0, 500),
 
             event:
               String(
                 payload.event ||
                 "pageview"
-              )
-              .slice(
-                0,
-                32
-              )
+              ).slice(0, 100)
 
           };
 
-          events.push(
-            event
-          );
+          events.push(event);
 
-          appendToDisk(
-            event
-          );
+          appendToDisk(event);
 
-          if (
-            events.length >
-            MAX_EVENTS_IN_MEMORY
-          ) {
-
-            events =
-              events.slice(
-                -MAX_EVENTS_IN_MEMORY
-              );
-
-          }
+          cleanupEvents();
 
           return sendJSON(
             res,
             200,
             {
-              ok: true
+
+              ok: true,
+
+              message:
+                "Visitor event recorded",
+
+              timestamp:
+                event.ts
+
             }
           );
 
         } catch (error) {
 
+          console.error(
+            "Track error:",
+            error
+          );
+
           return sendJSON(
             res,
             400,
             {
+
               ok: false,
+
               error:
-                "bad request"
+                "Could not process tracking request"
+
             }
           );
 
         }
+
       }
 
-
-      /* ======================================================
-         GET /active-now
-      ====================================================== */
+      // ----------------------------------------------
+      // GET /active-now
+      // ----------------------------------------------
 
       if (
         req.method === "GET" &&
@@ -734,6 +513,8 @@ const server =
           200,
           {
 
+            ok: true,
+
             activeNow:
               activeSessions.size,
 
@@ -742,12 +523,19 @@ const server =
 
           }
         );
+
       }
 
-
-      /* ======================================================
-         GET /live-stats
-      ====================================================== */
+      // ----------------------------------------------
+      // GET /live-stats
+      //
+      // Example:
+      //
+      // /live-stats?windowSeconds=604800&bucketSeconds=3600
+      //
+      // 604800 = 7 days
+      // 3600   = 1 hour
+      // ----------------------------------------------
 
       if (
         req.method === "GET" &&
@@ -757,20 +545,51 @@ const server =
         let windowSeconds =
           parseInt(
             parsed.query.windowSeconds
-          ) || 600;
+          );
 
+        let bucketSeconds =
+          parseInt(
+            parsed.query.bucketSeconds
+          );
+
+        if (
+          !Number.isFinite(
+            windowSeconds
+          ) ||
+          windowSeconds <= 0
+        ) {
+
+          windowSeconds =
+            86400;
+
+        }
+
+        if (
+          !Number.isFinite(
+            bucketSeconds
+          ) ||
+          bucketSeconds <= 0
+        ) {
+
+          bucketSeconds =
+            3600;
+
+        }
+
+        // Maximum 30 days
         windowSeconds =
           Math.min(
             windowSeconds,
-            7776000
+            HISTORY_DAYS *
+              24 *
+              60 *
+              60
           );
 
-        const bucketSeconds =
+        bucketSeconds =
           Math.max(
-            parseInt(
-              parsed.query.bucketSeconds
-            ) || 10,
-            5
+            bucketSeconds,
+            60
           );
 
         const now =
@@ -778,42 +597,33 @@ const server =
 
         const cutoff =
           now -
-          windowSeconds *
-          1000;
+          windowSeconds * 1000;
 
         const bucketMs =
-          bucketSeconds *
-          1000;
+          bucketSeconds * 1000;
 
-        const numberOfBuckets =
+        const numBuckets =
           Math.ceil(
-            (
-              now -
-              cutoff
-            ) /
-            bucketMs
+            windowSeconds /
+            bucketSeconds
           );
 
         const buckets =
           Array.from(
             {
               length:
-                numberOfBuckets
+                numBuckets
             },
-            function() {
-              return new Set();
-            }
+            () => new Set()
           );
 
         const pageviews =
           Array.from(
             {
               length:
-                numberOfBuckets
+                numBuckets
             },
-            function() {
-              return 0;
-            }
+            () => 0
           );
 
         for (
@@ -821,26 +631,20 @@ const server =
         ) {
 
           if (
-            event.ts <
-            cutoff
+            event.ts < cutoff
           ) {
             continue;
           }
 
           const index =
-            Math.min(
-              Math.floor(
-                (
-                  event.ts -
-                  cutoff
-                ) /
-                bucketMs
-              ),
-              numberOfBuckets - 1
+            Math.floor(
+              (event.ts - cutoff) /
+              bucketMs
             );
 
           if (
-            index < 0
+            index < 0 ||
+            index >= numBuckets
           ) {
             continue;
           }
@@ -849,12 +653,13 @@ const server =
             event.sessionId
           );
 
-          pageviews[index] += 1;
+          pageviews[index]++;
+
         }
 
         const series =
           buckets.map(
-            function(set, index) {
+            (bucket, index) => {
 
               return {
 
@@ -863,11 +668,10 @@ const server =
                     cutoff +
                     index *
                     bucketMs
-                  )
-                  .toISOString(),
+                  ).toISOString(),
 
                 visitors:
-                  set.size,
+                  bucket.size,
 
                 pageviews:
                   pageviews[index]
@@ -884,371 +688,328 @@ const server =
 
             ok: true,
 
-            windowSeconds:
-              windowSeconds,
+            windowSeconds,
 
-            bucketSeconds:
-              bucketSeconds,
+            bucketSeconds,
 
-            series:
-              series
+            series
 
           }
         );
+
       }
 
-
-      /* ======================================================
-         GET /traffic-history
-      ====================================================== */
+      // ----------------------------------------------
+      // DAILY STATS
+      //
+      // Returns last 30 days
+      // ----------------------------------------------
 
       if (
         req.method === "GET" &&
-        parsed.pathname === "/traffic-history"
+        parsed.pathname === "/daily-stats"
       ) {
 
         const now =
-          Date.now();
+          new Date();
 
-        let from;
-        let to =
-          now;
+        const result = [];
 
-        const range =
-          String(
-            parsed.query.range ||
-            "7days"
-          )
-          .toLowerCase();
-
-
-        /* CUSTOM DATE */
-
-        if (
-          parsed.query.from
+        for (
+          let i = HISTORY_DAYS - 1;
+          i >= 0;
+          i--
         ) {
 
-          const fromDate =
-            new Date(
-              String(
-                parsed.query.from
-              ) +
-              "T00:00:00"
-            );
-
-          const toDate =
-            new Date(
-              String(
-                parsed.query.to ||
-                parsed.query.from
-              ) +
-              "T23:59:59.999"
-            );
-
-          if (
-            isNaN(
-              fromDate.getTime()
-            ) ||
-            isNaN(
-              toDate.getTime()
-            )
-          ) {
-
-            return sendJSON(
-              res,
-              400,
-              {
-
-                ok: false,
-
-                error:
-                  "Invalid date. Use YYYY-MM-DD."
-
-              }
-            );
-          }
-
-          from =
-            fromDate.getTime();
-
-          to =
-            toDate.getTime();
-
-        }
-
-
-        /* TODAY */
-
-        else if (
-          range === "today"
-        ) {
-
-          const date =
+          const start =
             new Date(now);
 
-          date.setHours(
+          start.setHours(
             0,
             0,
             0,
             0
           );
 
-          from =
-            date.getTime();
+          start.setDate(
+            start.getDate() - i
+          );
 
-          date.setHours(
+          const end =
+            new Date(start);
+
+          end.setDate(
+            end.getDate() + 1
+          );
+
+          const uniqueVisitors =
+            new Set();
+
+          let pageviews = 0;
+
+          for (
+            const event of events
+          ) {
+
+            if (
+              event.ts >=
+                start.getTime() &&
+              event.ts <
+                end.getTime()
+            ) {
+
+              uniqueVisitors.add(
+                event.sessionId
+              );
+
+              pageviews++;
+
+            }
+
+          }
+
+          result.push({
+
+            date:
+              start
+                .toISOString()
+                .slice(0, 10),
+
+            visitors:
+              uniqueVisitors.size,
+
+            pageviews
+
+          });
+
+        }
+
+        return sendJSON(
+          res,
+          200,
+          {
+
+            ok: true,
+
+            days:
+              result
+
+          }
+        );
+
+      }
+
+      // ----------------------------------------------
+      // WEEKLY STATS
+      // ----------------------------------------------
+
+      if (
+        req.method === "GET" &&
+        parsed.pathname === "/weekly-stats"
+      ) {
+
+        const result = [];
+
+        const now =
+          new Date();
+
+        for (
+          let week = 3;
+          week >= 0;
+          week--
+        ) {
+
+          const end =
+            new Date(now);
+
+          end.setHours(
             23,
             59,
             59,
             999
           );
 
-          to =
-            date.getTime();
-
-        }
-
-
-        /* 7 DAYS */
-
-        else if (
-          range === "7days"
-        ) {
-
-          from =
-            now -
-            6 *
-            24 *
-            60 *
-            60 *
-            1000;
-
-        }
-
-
-        /* 30 DAYS */
-
-        else if (
-          range === "30days"
-        ) {
-
-          from =
-            now -
-            29 *
-            24 *
-            60 *
-            60 *
-            1000;
-
-        }
-
-
-        /* 90 DAYS */
-
-        else if (
-          range === "90days"
-        ) {
-
-          from =
-            now -
-            89 *
-            24 *
-            60 *
-            60 *
-            1000;
-
-        }
-
-
-        else {
-
-          return sendJSON(
-            res,
-            400,
-            {
-
-              ok: false,
-
-              error:
-                "Invalid range. Use today, 7days, 30days or 90days."
-
-            }
+          end.setDate(
+            end.getDate() -
+            week * 7
           );
 
-        }
+          const start =
+            new Date(end);
 
+          start.setDate(
+            start.getDate() - 6
+          );
 
-        const filtered =
-          events.filter(
-            function(event) {
+          start.setHours(
+            0,
+            0,
+            0,
+            0
+          );
 
-              return (
-                event.ts >= from &&
-                event.ts <= to
+          const uniqueVisitors =
+            new Set();
+
+          let pageviews = 0;
+
+          for (
+            const event of events
+          ) {
+
+            if (
+              event.ts >=
+                start.getTime() &&
+              event.ts <=
+                end.getTime()
+            ) {
+
+              uniqueVisitors.add(
+                event.sessionId
               );
 
+              pageviews++;
+
             }
-          );
-
-
-        const daily =
-          getDailyHistory(
-            from,
-            to
-          );
-
-        const weekly =
-          getWeeklyHistory(
-            from,
-            to
-          );
-
-        const monthly =
-          getMonthlyHistory(
-            from,
-            to
-          );
-
-
-        return sendJSON(
-          res,
-          200,
-          {
-
-            ok: true,
-
-            range:
-              range,
-
-            summary: {
-
-              visitors:
-                getUniqueVisitors(
-                  filtered
-                ),
-
-              pageviews:
-                filtered.length,
-
-              from:
-                new Date(
-                  from
-                ).toISOString(),
-
-              to:
-                new Date(
-                  to
-                ).toISOString(),
-
-              days:
-                daily.length
-
-            },
-
-            daily:
-              daily,
-
-            weekly:
-              weekly,
-
-            monthly:
-              monthly
 
           }
-        );
-      }
 
+          result.push({
 
-      /* ======================================================
-         GET /health
-      ====================================================== */
-
-      if (
-        req.method === "GET" &&
-        parsed.pathname === "/health"
-      ) {
-
-        return sendJSON(
-          res,
-          200,
-          {
-
-            ok: true,
-
-            events:
-              events.length,
-
-            historyDays:
-              HISTORY_DAYS,
-
-            serverTime:
-              new Date()
+            week:
+              start
                 .toISOString()
+                .slice(0, 10),
+
+            visitors:
+              uniqueVisitors.size,
+
+            pageviews
+
+          });
+
+        }
+
+        return sendJSON(
+          res,
+          200,
+          {
+
+            ok: true,
+
+            weeks:
+              result
 
           }
         );
+
       }
 
-
-      /* ======================================================
-         DASHBOARD
-      ====================================================== */
+      // ----------------------------------------------
+      // MONTHLY STATS
+      // ----------------------------------------------
 
       if (
         req.method === "GET" &&
-        (
-          parsed.pathname === "/" ||
-          parsed.pathname === "/dashboard.html"
-        )
+        parsed.pathname === "/monthly-stats"
       ) {
 
-        const file =
-          path.join(
-            __dirname,
-            "dashboard.html"
-          );
+        const result = [];
 
-        fs.readFile(
-          file,
-          function(error, content) {
+        const now =
+          new Date();
 
-            if (error) {
+        for (
+          let monthOffset = 2;
+          monthOffset >= 0;
+          monthOffset--
+        ) {
 
-              res.writeHead(
-                500,
-                {
-                  "Content-Type":
-                    "text/plain"
-                }
+          const start =
+            new Date(
+              now.getFullYear(),
+              now.getMonth() -
+                monthOffset,
+              1,
+              0,
+              0,
+              0,
+              0
+            );
+
+          const end =
+            new Date(
+              now.getFullYear(),
+              now.getMonth() -
+                monthOffset +
+                1,
+              1,
+              0,
+              0,
+              0,
+              0
+            );
+
+          const uniqueVisitors =
+            new Set();
+
+          let pageviews = 0;
+
+          for (
+            const event of events
+          ) {
+
+            if (
+              event.ts >=
+                start.getTime() &&
+              event.ts <
+                end.getTime()
+            ) {
+
+              uniqueVisitors.add(
+                event.sessionId
               );
 
-              return res.end(
-                "dashboard.html missing"
-              );
+              pageviews++;
+
             }
 
-            res.writeHead(
-              200,
-              {
-                "Content-Type":
-                  "text/html"
-              }
-            );
+          }
 
-            res.end(
-              content
-            );
+          result.push({
+
+            month:
+              `${start.getFullYear()}-${String(
+                start.getMonth() + 1
+              ).padStart(2, "0")}`,
+
+            visitors:
+              uniqueVisitors.size,
+
+            pageviews
+
+          });
+
+        }
+
+        return sendJSON(
+          res,
+          200,
+          {
+
+            ok: true,
+
+            months:
+              result
 
           }
         );
 
-        return;
       }
 
-
-      /* ======================================================
-         404
-      ====================================================== */
+      // ----------------------------------------------
+      // 404
+      // ----------------------------------------------
 
       return sendJSON(
         res,
@@ -1269,28 +1030,20 @@ const server =
     }
   );
 
-
-/* ============================================================
-   START
-============================================================ */
+// --------------------------------------------------
+// START SERVER
+// --------------------------------------------------
 
 server.listen(
   PORT,
-  function() {
+  () => {
 
     console.log(
-      "Live tracker running on port " +
-      PORT
+      `Live tracker running on port ${PORT}`
     );
 
     console.log(
-      "Historical traffic API enabled."
-    );
-
-    console.log(
-      "History retention: " +
-      HISTORY_DAYS +
-      " days."
+      `Keeping ${HISTORY_DAYS} days of history`
     );
 
   }
